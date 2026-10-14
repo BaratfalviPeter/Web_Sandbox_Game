@@ -48,6 +48,33 @@ export const CONFIG = {
   VIEWPORT_PADDING: 40,
   /** Animation duration (seconds) for the zoom-out on level up. */
   ZOOM_ANIM_DURATION: 0.8,
+
+  // View transition (macro <-> micro) ---------------------------------------
+  /** Duration (seconds) of the fade when switching between layers. */
+  VIEW_FADE_DURATION: 0.35,
+  /** Scroll "zoom" accumulated over a node needed to dive into MICRO view. */
+  ZOOM_IN_THRESHOLD: 3,
+  /** Scroll "zoom" accumulated to pop back out to MACRO view. */
+  ZOOM_OUT_THRESHOLD: 3,
+
+  // Micro view (mine interior) ----------------------------------------------
+  MICRO_GRID_SIZE: 9,
+  /** Machine/belt tiles the player can place inside each mine. */
+  MICRO_STARTING_PARTS: 40,
+  /** Fraction of micro cells that start as ore patches. */
+  MICRO_ORE_DENSITY: 0.22,
+  /** Seconds a miner takes to extract one unit from the ore below it. */
+  MINER_EXTRACT_INTERVAL: 1.4,
+  /** Cells per second an item travels along a conveyor belt. */
+  ITEM_SPEED: 2.2,
+  /** Background micro color palette. */
+  MICRO_BG_COLOR: '#e9e9ec',
+  MICRO_GRID_LINE_COLOR: '#dcdce1',
+  MICRO_ORE_COLOR: '#8d99ae',
+  MINER_COLOR: '#495057',
+  CONVEYOR_COLOR: '#ced4da',
+  CONVEYOR_ARROW_COLOR: '#868e96',
+  WAREHOUSE_COLOR: '#2b2d42',
 } as const;
 
 export const RESOURCE_COLORS: Record<ResourceType, string> = {

@@ -56,7 +56,92 @@ export interface ResourceNode {
   warningTimer: number | null;
   /** Whether this node is connected to the city via roads. */
   connected: boolean;
+  /**
+   * The internal "micro" world of this deposit (mine interior). Production is
+   * driven by the machines the player builds here — see MicroState. This
+   * simulation runs in the background even while the player is in MACRO view.
+   */
+  micro: MicroState;
 }
+
+// ===========================================================================
+// MICRO VIEW — the inside of a resource deposit (mine interior)
+// ===========================================================================
+
+/** Direction a conveyor pushes items. */
+export type ConveyorDir = 'up' | 'down' | 'left' | 'right';
+
+export type MicroCellType = 'empty' | 'ore' | 'miner' | 'conveyor' | 'warehouse';
+
+export interface MicroCell {
+  x: number;
+  y: number;
+  type: MicroCellType;
+  /** True for `ore` cells that still contain extractable material. */
+  hasOre?: boolean;
+}
+
+/** A mining machine that extracts ore from the cell beneath it. */
+export interface Miner {
+  id: string;
+  x: number;
+  y: number;
+  /** Internal accumulator toward the next extracted unit. */
+  timer: number;
+}
+
+/** A directional belt tile that moves items toward the warehouse. */
+export interface Conveyor {
+  id: string;
+  x: number;
+  y: number;
+  dir: ConveyorDir;
+}
+
+/** The fixed local warehouse that feeds the macro node's output. */
+export interface LocalWarehouse {
+  x: number;
+  y: number;
+  stored: number;
+}
+
+/** A single unit of material travelling along the belts (pixel-smooth). */
+export interface MicroItem {
+  id: string;
+  /** Pixel-precise (cell-space) position for smooth animation. */
+  px: number;
+  py: number;
+  color: string;
+}
+
+/**
+ * The isolated internal grid of a single resource node. Lives inside
+ * ResourceNode.micro and is simulated continuously (even in MACRO view).
+ */
+export interface MicroState {
+  gridSize: number;
+  cells: MicroCell[][];
+  miners: Miner[];
+  conveyors: Conveyor[];
+  items: MicroItem[];
+  warehouse: LocalWarehouse;
+  /** How many machine tiles the player may still place inside this mine. */
+  availableParts: number;
+  /** Rolling measure of units delivered to the warehouse per second. */
+  throughputPerSec: number;
+  /** Internal: units delivered within the current measuring window. */
+  deliveredInWindow: number;
+  windowTimer: number;
+}
+
+/**
+ * Which layer of the game the player is currently looking at.
+ * MACRO = the world map (cities, roads, vehicles, nodes).
+ * MICRO = the interior of a single resource node (identified by nodeId).
+ */
+export type ViewState =
+  | { level: 'MACRO' }
+  | { level: 'MICRO'; nodeId: string };
 
 /**
  * A road is stored as the set of cells the player has painted. We keep an

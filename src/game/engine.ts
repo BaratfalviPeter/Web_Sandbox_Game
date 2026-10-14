@@ -9,6 +9,7 @@ import {
   type ResourceType,
   type Vehicle,
 } from './types';
+import { createMicroState, updateMicro } from './micro';
 
 // ===========================================================================
 // Pure-ish game engine: state creation, pathfinding, and the per-frame tick.
@@ -115,6 +116,7 @@ export function spawnResourceNode(state: GameState): ResourceNode | null {
     isFull: false,
     warningTimer: null,
     connected: false,
+    micro: createMicroState(),
   };
   state.cells[pos.y][pos.x].type = 'resource';
   state.resourceNodes.push(node);
@@ -372,21 +374,32 @@ export function updateGame(state: GameState, dt: number): TickEvents {
 
   state.elapsed += dt;
 
-  // --- Resource production + danger timers --------------------------------
+  // --- Micro simulation + resource production -----------------------------
+  // Each node's MICRO world is simulated continuously (even while the player
+  // is in MACRO view). The node no longer produces on a timer: its output is
+  // driven entirely by how much material the micro warehouse delivers. Units
+  // sitting in the micro warehouse flow into the macro node's storage.
   for (const node of state.resourceNodes) {
-    if (!node.isFull) {
-      node.productionTimer += dt;
-      while (node.productionTimer >= node.productionInterval && !node.isFull) {
-        node.productionTimer -= node.productionInterval;
-        node.storedAmount = Math.min(node.maxStorage, node.storedAmount + 1);
-        if (node.storedAmount >= node.maxStorage) {
-          node.isFull = true;
-          node.warningTimer = CONFIG.NODE_WARNING_DURATION;
-        }
-      }
+    updateMicro(node.micro, node.resourceType, dt);
+
+    // Pull delivered units from the micro warehouse into the macro node,
+    // respecting the node's storage cap. Leftover stays in the micro
+    // warehouse until the vehicles free up macro capacity.
+    while (node.micro.warehouse.stored > 0 && node.storedAmount < node.maxStorage) {
+      node.micro.warehouse.stored -= 1;
+      node.storedAmount += 1;
     }
 
-    // Danger countdown while full.
+    const wasFull = node.isFull;
+    node.isFull = node.storedAmount >= node.maxStorage;
+    if (node.isFull && !wasFull) {
+      node.warningTimer = CONFIG.NODE_WARNING_DURATION;
+    }
+    if (!node.isFull) {
+      node.warningTimer = null;
+    }
+
+    // Danger countdown while full (deposit overflow -> game over).
     if (node.isFull && node.warningTimer !== null) {
       node.warningTimer -= dt;
       if (node.warningTimer <= 0) {
