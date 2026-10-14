@@ -1,58 +1,77 @@
-# Hálózat & Fejlődés
+# Hálózat & Gyár
 
-Minimalista 2D logisztikai / városépítő puzzle játék — a "Mini Motorways" letisztult
-hangulata nyersanyag-menedzsmenttel ötvözve.
+Minimalista 2D logisztikai játék két rétegben — **Makró** (világtérkép: városok,
+utak, járművek, lelőhelyek) és **Mikró** (a bánya belseje: bányagépek,
+futószalagok, helyi raktár). A két réteg össze van kötve: a mikró raktár
+áteresztőképessége adja a makró lelőhely kimenetét.
 
 **Tech stack:** React 19 · TypeScript · Vite · Tailwind CSS · HTML5 Canvas
 
+🎮 **Élő verzió:** https://baratfalvipeter.github.io/Web_Sandbox_Game/
+
 ## Játékmenet
 
-- Középen a **Városközpont**. Körülötte véletlenszerűen **nyersanyag lelőhelyek** jelennek meg.
-- **Húzz utakat** (egérrel, drag & drop a canvason) a lelőhelyektől a városig.
-- Sikeres összekötés után kis **járművek** ingáznak az úton, és nyersanyagot
-  szállítanak a városba.
-- A beérkező nyersanyag tölti a város fejlődés-sávját. Ha betelik → **szintlépés**:
-  a kamera kizoomol (nagyobb rács), bónusz utakat kapsz, és a város vizuálisan is nő.
-- Ha egy lelőhely **megtelik** és nem viszik el időben, piros villogással
-  visszaszámlálás indul. Ha lejár → **Game Over** (modal az eredménnyel + "Új játék").
+### Makró nézet (világtérkép)
+- Középen 2×2 cellás **Városközpont**. 2 lelőhellyel indul, újak 25–40 mp-enként
+  jelennek meg (a szinttel nő a maximum, min. 2 cella távolságra egymástól és a
+  várostól).
+- Típus = szín: **szürke = Szén, zöld = Fa, sárga = Érc** (ugyanez a szín a mikró
+  nézetben is).
+- **Húzz utakat** (vastag, lekerekített) a lelőhelytől a városig. Egy jármű jár a
+  bekötött lelőhelyre, BFS-sel keres utat, 2 egység kapacitással hordja a várost.
+- A lelőhely körüli **gyűrű** a helyi raktár töltöttségét mutatja. Ha megtelik,
+  **30 mp-es visszaszámlálás** indul (piros, pulzáló gyűrű). Ha az elszállítás
+  újraindul, az időzítő megáll. Ha lejár → **Game Over**.
+- Szintlépéskor a rács nő és a **kamera 600 ms alatt kizoomol**, +10 útelem jár.
+  Szintküszöb: `16 + 8 * (szint - 1)`.
 
-### Irányítás
+### Mikró nézet (a bánya belseje)
+- 9×9 rács, fix 2×2 **Lokális Raktár** (mindig látható, rajta a darabszám).
+- **Bányagép** (5 alkatrész): csak ércre rakható, 1 egység/mp a kimenete felé néző
+  cellába. Ha nincs hova termelnie, **piros „!”** jelenik meg rajta.
+- **Futószalag** (1 alkatrész): irányított cella, lapos csík mozgó nyilakkal.
+  Húzás közben az irányt az **egér útvonala** adja; **R** billentyű forgat. Az
+  elemek 2 cella/mp sebességgel haladnak, max. 3 fér egy cellára (torlódás
+  visszaterjed). Ha a lánc nem ér a raktárhoz, a vége szaggatott vonallal jelez.
+- Minden új lelőhely egy **előre lerakott, működő** bányagép+szalag lánccal indul.
+- Az „egység/mp” az utolsó 10 mp raktárba érkezett egységeinek átlaga.
 
-| Művelet | Hogyan |
-|---|---|
-| Út lerakása | Bal egérgomb lenyomva húzás üres cellákon |
-| Út törlése | Jobb klikk, vagy kattintás meglévő útra és húzás |
+### Nézetváltás
+- Belépés a mikróba: **dupla kattintás** egy lelőhelyre, vagy **görgő befelé**
+  fölötte. Kilépés: **„Vissza a világtérképre”** gomb, vagy **görgő kifelé**.
+- A mikró szimuláció a háttérben is fut, váltáskor az állapot nem vész el.
 
 ## Fejlesztés
 
 ```bash
 npm install
 npm run dev      # fejlesztői szerver
-npm run build    # típusellenőrzés (tsc) + production build
+npm run build    # tsc típusellenőrzés + production build
 npm run preview  # a buildelt verzió kiszolgálása
 ```
 
-## Architektúra
+## Architektúra (v2 — szimuláció és rajzolás szétválasztva)
 
 ```
 src/
-├─ game/
-│  ├─ types.ts      # Erős TS tipizálás: Cell, CityHub, ResourceNode, RoadSegment, Vehicle, GameState
-│  ├─ config.ts     # Hangolható konstansok + pasztell színpaletta
-│  ├─ engine.ts     # Állapot, BFS pathfinding, connectivity, szintlépés, per-frame tick
-│  ├─ renderer.ts   # Canvas rajzolás (flat/pastel, lekerekített utak), zoom-transform
-│  └─ input.ts      # Képernyő → grid cella konverzió
-└─ components/
-   ├─ GameCanvas.tsx   # requestAnimationFrame game loop, egér-interakció, zoom animáció
-   ├─ StatsPanel.tsx   # Bal felső: szint + progress bar
-   ├─ RoadsPanel.tsx   # Jobb alsó: elérhető út-csempék
-   └─ GameOverModal.tsx
+├─ types.ts            # Megosztott adatmodell (Macro/Micro/View)
+├─ colors.ts           # EGYETLEN közös COLORS forrás (mindkét nézet ezt használja)
+├─ config.ts           # Hangolható konstansok (fix 20 Hz szimuláció)
+├─ sim/
+│  ├─ macro.ts         # Világtérkép logika: node-ok, BFS, járművek, szintlépés, Game Over
+│  └─ micro.ts         # Bánya logika: bányagép/szalag/raktár, torlódás, áteresztőképesség
+├─ render/
+│  ├─ transform.ts     # Safe-area → rács transzformáció + segédek
+│  ├─ pick.ts          # Képernyő → cella (safe-area + DPR tudatos)
+│  ├─ macroRenderer.ts # Csak olvassa az állapotot
+│  └─ microRenderer.ts # Csak olvassa az állapotot
+├─ ui/                 # React overlay (MacroHud, MicroHud, GameOverModal)
+└─ App.tsx             # Teljes-képernyős canvas, ResizeObserver, fix időlépés + rAF, nézetváltás
 ```
 
-- A szimuláció állapota egy `useRef`-ben él (teljesítmény miatt a game loop
-  helyben mutálja), a UI overlay pedig egy könnyű snapshotot kap `useState`-en
-  keresztül (~10/mp frissítéssel).
-- A megjelenítés egyetlen `<canvas>`-on történik, amit egy `useEffect`-ben futó
-  `requestAnimationFrame` loop vezérel.
-- A járművek pixel-pontos pozícióval mozognak, az útvonalukat BFS számolja a
-  lerakott utakon (csak vízszintes/függőleges szomszédok).
+- **Teljes-képernyős canvas**: `ResizeObserver` + `devicePixelRatio` (éles retina).
+- **UI-réteg**: a konténer `pointer-events: none`, csak a gombok/kártyák kapják
+  vissza. A rács egy számított **safe area**-re skálázódik, így semmilyen UI nem
+  takarja a játékmezőt (mikróban a raktár mindig látszik).
+- **Fix 20 Hz szimuláció**, a rajzolás `requestAnimationFrame`-ből történik; a
+  logika tiszta TS modulokban él, a renderer csak olvassa az állapotot.

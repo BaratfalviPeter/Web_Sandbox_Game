@@ -1,8 +1,8 @@
-import { computeTransform } from './renderer';
-import type { GridPos } from './types';
+import { computeTransform, type SafeArea } from './transform';
 
 // ===========================================================================
-// Converts canvas pixel coordinates to logical grid cells.
+// Convert a client (mouse) coordinate into a logical grid cell, honoring the
+// safe area and the canvas backing-store scaling.
 // ===========================================================================
 
 export function screenToCell(
@@ -11,19 +11,18 @@ export function screenToCell(
   rect: DOMRect,
   canvasW: number,
   canvasH: number,
+  area: SafeArea,
   animatedGridSize: number,
   gridSize: number,
-): GridPos | null {
-  // Account for CSS scaling between the canvas backing store and layout size.
+): { x: number; y: number } | null {
   const scaleX = canvasW / rect.width;
   const scaleY = canvasH / rect.height;
   const px = (clientX - rect.left) * scaleX;
   const py = (clientY - rect.top) * scaleY;
 
-  const t = computeTransform(canvasW, canvasH, animatedGridSize);
+  const t = computeTransform(area, animatedGridSize);
   const cx = Math.floor((px - t.originX) / t.cellSize);
   const cy = Math.floor((py - t.originY) / t.cellSize);
-
   if (cx < 0 || cy < 0 || cx >= gridSize || cy >= gridSize) return null;
   return { x: cx, y: cy };
 }
