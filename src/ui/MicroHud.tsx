@@ -1,189 +1,95 @@
-import type { Dir } from '../types';
+import { BASE_PRODUCTION_PER_MONTH, COST_BELT, COST_MINER, MICRO_HELP_H, MICRO_TOOLBAR_H, TOPBAR_H } from '../constants';
+import { CARGO_LABEL, INDUSTRY_DEFS } from '../sim/defs';
+import type { Dir, GameState, Industry, MicroTool } from '../types';
+import { fmtFt } from './format';
 
-export type MicroTool = 'miner' | 'belt' | 'erase';
-
-interface MicroHudProps {
-  nodeLabel: string;
+interface Props {
+  game: GameState;
+  industry: Industry;
   tool: MicroTool;
   dir: Dir;
-  parts: number;
-  throughput: number;
-  storageCount: number;
-  storageCap: number;
-  onBack: () => void;
   onTool: (t: MicroTool) => void;
   onDir: (d: Dir) => void;
+  onBack: () => void;
 }
 
-const DIR_ROT: Record<Dir, string> = {
-  right: 'rotate-0',
-  down: 'rotate-90',
-  left: 'rotate-180',
-  up: '-rotate-90',
-};
+const ROT = [-90, 0, 90, 180];
 
-/**
- * MICRO view HUD. The bottom toolbar lives in a fixed-height reserved strip so
- * it never overlaps the playfield (the canvas reserves this area as non-safe).
- */
-export function MicroHud({
-  nodeLabel,
-  tool,
-  dir,
-  parts,
-  throughput,
-  storageCount,
-  storageCap,
-  onBack,
-  onTool,
-  onDir,
-}: MicroHudProps) {
+function Arrow({ deg, size = 14 }: { deg: number; size?: number }) {
   return (
-    <>
-      {/* top-left: back + label */}
-      <div className="pointer-events-auto absolute left-5 top-5 select-none">
-        <button
-          onClick={onBack}
-          className="flex items-center gap-2 rounded-2xl bg-white/90 px-4 py-3 text-sm font-semibold text-gray-700 shadow-sm backdrop-blur-sm transition-colors hover:bg-white"
-        >
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <path
-              d="M14 7l-5 5 5 5"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-          Vissza a világtérképre
-        </button>
-        <div className="mt-2 inline-block rounded-xl bg-gray-800/80 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-sm">
-          {nodeLabel} · belső nézet
-        </div>
-      </div>
-
-      {/* top-right: storage + throughput readouts */}
-      <div className="pointer-events-none absolute right-5 top-5 select-none">
-        <div className="flex gap-3">
-          <Readout label="raktár" value={`${storageCount}/${storageCap}`} tone="dark" />
-          <Readout label="egység/mp" value={throughput.toFixed(1)} tone="green" />
-        </div>
-      </div>
-
-      {/* bottom reserved strip: toolbar (defines non-safe area) */}
-      <div className="pointer-events-auto absolute inset-x-0 bottom-0 flex h-28 items-center justify-center bg-white/80 backdrop-blur-sm">
-        <div className="flex items-center gap-3">
-          <Tool active={tool === 'miner'} label="Bányagép" cost="5" onClick={() => onTool('miner')}>
-            <MinerIcon />
-          </Tool>
-          <Tool active={tool === 'belt'} label="Futószalag" cost="1" onClick={() => onTool('belt')}>
-            <BeltIcon dir={dir} />
-          </Tool>
-          <Tool active={tool === 'erase'} label="Törlés" onClick={() => onTool('erase')}>
-            <EraseIcon />
-          </Tool>
-
-          <div className="ml-1 flex items-center gap-1 rounded-xl bg-gray-100 p-1">
-            {(['up', 'right', 'down', 'left'] as Dir[]).map((d) => (
-              <button
-                key={d}
-                onClick={() => onDir(d)}
-                className={`flex h-9 w-9 items-center justify-center rounded-lg text-lg text-gray-600 transition-colors ${
-                  dir === d ? 'bg-white shadow-sm' : 'hover:bg-white/60'
-                }`}
-                title={`Irány: ${d} (R forgat)`}
-              >
-                <span className={DIR_ROT[d]}>→</span>
-              </button>
-            ))}
-          </div>
-
-          <div className="mx-1 h-12 w-px bg-gray-200" />
-
-          <div className="px-1 text-center leading-none">
-            <div className="text-2xl font-bold text-gray-700">{parts}</div>
-            <div className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-              alkatrész
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* hint just above the toolbar strip */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-28 mb-2 text-center text-xs text-gray-400">
-        Kattints/húzz a lerakáshoz · húzás közben az irányt az útvonal adja · R forgat · görgő kifelé = vissza
-      </div>
-    </>
+    <svg width={size} height={size} viewBox="0 0 16 16" style={{ transform: `rotate(${deg}deg)` }} className="inline-block">
+      <path d="M2 8h11M9 4l4 4-4 4" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
-function Readout({ label, value, tone }: { label: string; value: string; tone: 'dark' | 'green' }) {
-  return (
-    <div className="rounded-2xl bg-white/90 px-4 py-2 text-center shadow-sm backdrop-blur-sm">
-      <div className={`text-xl font-bold ${tone === 'green' ? 'text-emerald-600' : 'text-gray-700'}`}>
-        {value}
-      </div>
-      <div className="text-[10px] font-medium uppercase tracking-wider text-gray-400">{label}</div>
-    </div>
-  );
-}
-
-function Tool({
-  active,
-  label,
-  cost,
-  onClick,
-  children,
-}: {
-  active: boolean;
-  label: string;
-  cost?: string;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
+/** Micro view chrome: header, help strip and the toolbar BELOW the grid (SPEC 8). */
+export function MicroHud({ game, industry, tool, dir, onTool, onDir, onBack }: Props) {
+  const m = industry.micro;
+  if (!m) return null;
+  const def = INDUSTRY_DEFS[industry.kind];
+  const toolBtn = (id: MicroTool, label: string, cost: string | null) => (
     <button
-      onClick={onClick}
-      className={`relative flex flex-col items-center gap-1 rounded-xl px-3 py-2 transition-colors ${
-        active ? 'bg-gray-800 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+      onClick={() => onTool(id)}
+      className={`flex min-w-[96px] flex-col items-center rounded px-3 py-1.5 ${
+        tool === id ? 'bg-[#e3e6ea] text-[#23272e]' : 'bg-[#3b4048] text-[#e3e6ea] hover:bg-[#474d56]'
       }`}
     >
-      <span className="flex h-6 w-6 items-center justify-center">{children}</span>
-      <span className="text-[10px] font-medium">{label}</span>
-      {cost && (
-        <span
-          className={`absolute -right-1 -top-1 rounded-full px-1.5 text-[9px] font-bold ${
-            active ? 'bg-white text-gray-800' : 'bg-gray-700 text-white'
-          }`}
-        >
-          {cost}
-        </span>
-      )}
+      <span className="text-[12px] font-semibold">{label}</span>
+      <span className="font-mono text-[10px] opacity-75">{cost ?? 'visszatérítés 100%'}</span>
     </button>
   );
-}
+  return (
+    <>
+      <div className="pointer-events-auto absolute left-3 flex items-center gap-3" style={{ top: TOPBAR_H + 10 }}>
+        <button
+          onClick={onBack}
+          className="rounded bg-[#2b2f36] px-3 py-1.5 text-[12px] font-semibold text-white shadow hover:bg-[#3b4048]"
+          title="Esc"
+        >
+          <span className="flex items-center gap-1.5"><Arrow deg={180} size={13} />Vissza a térképre</span>
+        </button>
+        <div className="rounded bg-[#2b2f36]/90 px-3 py-1.5 text-[12px] text-[#e3e6ea]">
+          <b>{industry.name}</b> · belső nézet · {def.produces ? CARGO_LABEL[def.produces] : ''}
+        </div>
+      </div>
+      <div
+        className="pointer-events-none absolute right-3 rounded bg-[#2b2f36]/90 px-3 py-1.5 text-right font-mono text-[11px] text-[#e3e6ea]"
+        style={{ top: TOPBAR_H + 10 }}
+      >
+        <div>Mikro-kimenet: {m.monthlyRate.toFixed(1)} egység/hó</div>
+        <div className="text-[#9aa1aa]">Alap: {BASE_PRODUCTION_PER_MONTH} egység/hó · Raktárba összesen: {m.totalDelivered}</div>
+      </div>
 
-function MinerIcon() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-      <rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" />
-      <circle cx="12" cy="12" r="3" fill="#ffd166" />
-    </svg>
-  );
-}
-function BeltIcon({ dir }: { dir: Dir }) {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" className={DIR_ROT[dir]}>
-      <rect x="3" y="7" width="18" height="10" rx="3" fill="currentColor" />
-      <path d="M9 8l4 4-4 4" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-function EraseIcon() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-      <path d="M7 17l-3-3 9-9 3 3-9 9z" fill="currentColor" />
-      <path d="M7 17h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    </svg>
+      <div
+        className="pointer-events-none absolute inset-x-0 flex items-center justify-center bg-[#2b2f36]/85 text-[11px] text-[#c7ccd3]"
+        style={{ bottom: MICRO_TOOLBAR_H, height: MICRO_HELP_H }}
+      >
+        Bányagép csak nyersanyagcellára · szalag húzással (az irányt az útvonal adja) · R: forgatás · jobb klikk: bontás · Esc: vissza
+      </div>
+      <div
+        className="pointer-events-auto absolute inset-x-0 bottom-0 flex items-center justify-center gap-2 border-t border-[#16191d] bg-[#23272e]"
+        style={{ height: MICRO_TOOLBAR_H }}
+      >
+        {toolBtn('miner', 'Bányagép', fmtFt(COST_MINER))}
+        {toolBtn('belt', 'Futószalag', fmtFt(COST_BELT))}
+        {toolBtn('erase', 'Bontás', null)}
+        <div className="ml-3 flex overflow-hidden rounded border border-[#3b4048]">
+          {ROT.map((deg, i) => (
+            <button
+              key={i}
+              onClick={() => onDir(i as Dir)}
+              className={`flex h-9 w-9 items-center justify-center ${dir === i ? 'bg-[#e3e6ea] text-[#23272e]' : 'text-[#c7ccd3] hover:bg-[#3b4048]'}`}
+              title="Irány (R: forgatás)"
+            >
+              <Arrow deg={deg} />
+            </button>
+          ))}
+        </div>
+        <div className="ml-3 font-mono text-[12px] text-[#e3e6ea]">
+          Pénz: <span className={game.money < 0 ? 'text-[#ff7b7f]' : ''}>{fmtFt(game.money)}</span>
+        </div>
+      </div>
+    </>
   );
 }

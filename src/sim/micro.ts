@@ -1,305 +1,378 @@
-import { CONFIG } from '../config';
+// Micro view simulation: the inside of a primary industry (SPEC 8).
+// Pure TypeScript — runs for every primary industry every sub-step, whether
+// or not the player is looking at it.
+
 import {
-  DIRS,
-  keyOf,
-  type Belt,
+  BELT_CELL_CAPACITY,
+  BELT_SPEED,
+  COST_BELT,
+  COST_MINER,
+  DAYS_PER_MONTH,
+  MICRO_AVG_DAYS,
+  MICRO_RESOURCE_MAX,
+  MICRO_RESOURCE_MIN,
+  MICRO_RESOURCE_MIN_DIST,
+  MICRO_SIZE,
+  MICRO_WAREHOUSE_X,
+  MICRO_WAREHOUSE_Y,
+  MINER_BLOCKED_ALERT_DAYS,
+  MINER_RATE,
+} from '../constants';
+import {
+  DX,
+  DY,
   type Dir,
+  type GameState,
+  type MicroBelt,
   type MicroItem,
+  type MicroMiner,
   type MicroState,
-  type MicroTile,
-  type Miner,
 } from '../types';
+import { canAfford, refund, spend } from './economy';
+import { mulberry32, randInt } from './rng';
 
-// ===========================================================================
-// MICRO simulation — the inside of a deposit (fixed-step, render-independent).
-//
-// Rules (v2):
-//  - Miners sit on ore veins, output 1 unit/sec toward their facing cell.
-//  - Belts move items 2 cells/sec; max 3 items per cell with backpressure.
-//  - A 2x2 warehouse accepts items; its stored count feeds the macro node.
-//  - Throughput = rolling average of units delivered over the last 10s.
-// ===========================================================================
+/** Minimum spacing between two items on a belt (3 per cell). */
+const SPACING = 1 / BELT_CELL_CAPACITY;
 
-let idc = 0;
-const nid = (p: string) => `${p}-${++idc}`;
-
-function buildTiles(size: number): MicroTile[][] {
-  const t: MicroTile[][] = [];
-  for (let y = 0; y < size; y++) {
-    const row: MicroTile[] = [];
-    for (let x = 0; x < size; x++) row.push({ x, y, type: 'empty' });
-    t.push(row);
-  }
-  return t;
+export function mIdx(m: MicroState, x: number, y: number): number {
+  return y * m.size + x;
 }
 
-/** Is (x,y) part of the 2x2 warehouse block? */
+export function mInBounds(m: MicroState, x: number, y: number): boolean {
+  return x >= 0 && y >= 0 && x < m.size && y < m.size;
+}
+
+/** Chebyshev distance from the 2x2 warehouse block (0 = inside). */
+function warehouseDist(m: MicroState, x: number, y: number): number {
+  const dx = Math.max(m.whX - x, 0, x - (m.whX + 1));
+  const dy = Math.max(m.whY - y, 0, y - (m.whY + 1));
+  return Math.max(dx, dy);
+}
+
 export function isWarehouse(m: MicroState, x: number, y: number): boolean {
-  return x >= m.whX && x <= m.whX + 1 && y >= m.whY && y <= m.whY + 1;
+  return mInBounds(m, x, y) && warehouseDist(m, x, y) === 0;
 }
 
-export function inBounds(m: MicroState, x: number, y: number): boolean {
-  return x >= 0 && y >= 0 && x < m.gridSize && y < m.gridSize;
+export function isResource(m: MicroState, x: number, y: number): boolean {
+  return mInBounds(m, x, y) && m.resources[mIdx(m, x, y)] === 1;
 }
 
-export function minerAt(m: MicroState, x: number, y: number): Miner | undefined {
-  return m.miners.find((mi) => mi.x === x && mi.y === y);
-}
-export function beltAt(m: MicroState, x: number, y: number): Belt | undefined {
-  return m.belts.find((b) => b.x === x && b.y === y);
-}
-export function isOre(m: MicroState, x: number, y: number): boolean {
-  return inBounds(m, x, y) && m.tiles[y][x].type === 'oreVein';
+export function minerAt(m: MicroState, x: number, y: number): MicroMiner | null {
+  return m.miners.find((e) => e.x === x && e.y === y) ?? null;
 }
 
-/** Create a micro world for a node of the given level, with a starter chain. */
-export function createMicroState(level: number): MicroState {
-  const size = CONFIG.MICRO_GRID_SIZE;
-  const tiles = buildTiles(size);
+export function beltAt(m: MicroState, x: number, y: number): MicroBelt | null {
+  return m.belts.find((e) => e.x === x && e.y === y) ?? null;
+}
 
-  // 2x2 warehouse anchored center-bottom.
-  const whX = Math.floor(size / 2) - 1;
-  const whY = size - 2;
+function localId(m: MicroState): number {
+  let max = 0;
+  for (const e of m.miners) max = Math.max(max, e.id);
+  for (const e of m.belts) max = Math.max(max, e.id);
+  return max + 1;
+}
 
+// ---------------------------------------------------------------------------
+// Creation (seeded resource cells + free starter chain)
+// ---------------------------------------------------------------------------
+
+export function createMicro(seed: number, industryId: number): MicroState {
+  const rng = mulberry32((Math.imul(seed, 31) + Math.imul(industryId, 977) + 13) >>> 0);
+  const size = MICRO_SIZE;
   const m: MicroState = {
-    gridSize: size,
-    tiles,
+    size,
+    resources: new Array<number>(size * size).fill(0),
+    whX: MICRO_WAREHOUSE_X,
+    whY: MICRO_WAREHOUSE_Y,
     miners: [],
     belts: [],
     items: [],
-    whX,
-    whY,
-    storage: { count: 0, capacity: CONFIG.STORAGE_CAPACITY_BASE },
-    availableParts: CONFIG.MICRO_STARTING_PARTS,
-    throughput: 0,
-    deliveryWindow: [],
+    totalDelivered: 0,
+    deliveredToday: 0,
+    dailyHistory: [],
+    monthlyRate: 0,
   };
 
-  // Scatter ore veins (never on the warehouse).
-  const veins = CONFIG.ORE_VEINS_BASE + CONFIG.ORE_VEINS_PER_LEVEL * (level - 1);
-  let placed = 0;
-  let guard = 0;
-  while (placed < veins && guard < 500) {
-    guard++;
-    const x = Math.floor(Math.random() * size);
-    const y = Math.floor(Math.random() * (size - 2)); // keep clear of warehouse row
-    if (isWarehouse(m, x, y)) continue;
-    if (tiles[y][x].type === 'oreVein') continue;
-    tiles[y][x].type = 'oreVein';
-    placed++;
+  const candidates: number[] = [];
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (warehouseDist(m, x, y) >= MICRO_RESOURCE_MIN_DIST) candidates.push(mIdx(m, x, y));
+    }
+  }
+  const count = randInt(rng, MICRO_RESOURCE_MIN, MICRO_RESOURCE_MAX);
+  for (let i = 0; i < count && candidates.length > 0; i++) {
+    const k = Math.floor(rng() * candidates.length);
+    m.resources[candidates[k]] = 1;
+    candidates.splice(k, 1);
   }
 
   placeStarterChain(m);
   return m;
 }
 
-/**
- * Pre-place a working miner + short belt line that reaches the warehouse so a
- * fresh deposit produces from second one (spec: "kezdő segítség").
- */
+/** Free miner + the shortest belt line into the warehouse (SPEC 8). */
 function placeStarterChain(m: MicroState): void {
-  // Find an ore vein in a column that can route straight down to the warehouse.
-  const whTopY = m.whY; // top row of warehouse block
-  // Prefer the warehouse's own columns so a straight vertical belt works.
-  const candidateCols = [m.whX, m.whX + 1];
-  for (const col of candidateCols) {
-    // Find topmost ore vein in this column above the warehouse.
-    for (let y = 0; y < whTopY; y++) {
-      if (m.tiles[y][col].type === 'oreVein') {
-        // Miner on the vein, facing down.
-        m.miners.push({ id: nid('miner'), x: col, y, dir: 'down', timer: 0, blocked: false });
-        m.availableParts -= CONFIG.MINER_COST;
-        // Belts straight down from vein+1 to the cell just above the warehouse.
-        for (let by = y + 1; by < whTopY; by++) {
-          if (isWarehouse(m, col, by)) break;
-          m.belts.push({ id: nid('belt'), x: col, y: by, dir: 'down' });
-          m.availableParts -= CONFIG.BELT_COST;
+  const n = m.size * m.size;
+  const next = new Int32Array(n).fill(-2); // -2 unvisited, -1 = feeds warehouse
+  const dirTo = new Int8Array(n);
+  const dist = new Int32Array(n).fill(1 << 30);
+  const queue: number[] = [];
+
+  for (let y = 0; y < m.size; y++) {
+    for (let x = 0; x < m.size; x++) {
+      if (isWarehouse(m, x, y) || isResource(m, x, y)) continue;
+      for (let d = 0; d < 4; d++) {
+        if (isWarehouse(m, x + DX[d], y + DY[d])) {
+          const c = mIdx(m, x, y);
+          next[c] = -1;
+          dirTo[c] = d;
+          dist[c] = 1;
+          queue.push(c);
+          break;
         }
-        return;
       }
     }
   }
-  // Fallback: force a vein directly above the warehouse and build the chain.
-  const col = m.whX;
-  const y = Math.max(0, whTopY - 2);
-  m.tiles[y][col].type = 'oreVein';
-  m.miners.push({ id: nid('miner'), x: col, y, dir: 'down', timer: 0, blocked: false });
-  m.availableParts -= CONFIG.MINER_COST;
-  for (let by = y + 1; by < whTopY; by++) {
-    if (isWarehouse(m, col, by)) break;
-    m.belts.push({ id: nid('belt'), x: col, y: by, dir: 'down' });
-    m.availableParts -= CONFIG.BELT_COST;
+  for (let qi = 0; qi < queue.length; qi++) {
+    const c = queue[qi];
+    const cx = c % m.size;
+    const cy = Math.floor(c / m.size);
+    for (let d = 0; d < 4; d++) {
+      const nx = cx + DX[d];
+      const ny = cy + DY[d];
+      if (!mInBounds(m, nx, ny) || isWarehouse(m, nx, ny) || isResource(m, nx, ny)) continue;
+      const nc = mIdx(m, nx, ny);
+      if (next[nc] !== -2) continue;
+      next[nc] = c;
+      dirTo[nc] = (d + 2) % 4; // points back toward c
+      dist[nc] = dist[c] + 1;
+      queue.push(nc);
+    }
+  }
+
+  let best: { rx: number; ry: number; d: Dir; start: number } | null = null;
+  let bestLen = 1 << 30;
+  for (let y = 0; y < m.size; y++) {
+    for (let x = 0; x < m.size; x++) {
+      if (!isResource(m, x, y)) continue;
+      for (let d = 0; d < 4; d++) {
+        const nx = x + DX[d];
+        const ny = y + DY[d];
+        if (!mInBounds(m, nx, ny)) continue;
+        const nc = mIdx(m, nx, ny);
+        if (next[nc] === -2 || dist[nc] >= bestLen) continue;
+        bestLen = dist[nc];
+        best = { rx: x, ry: y, d: d as Dir, start: nc };
+      }
+    }
+  }
+  if (!best) return;
+
+  m.miners.push({ id: localId(m), x: best.rx, y: best.ry, dir: best.d, timer: 0, paid: 0, blockedDays: 0 });
+  let c = best.start;
+  while (c >= 0) {
+    m.belts.push({ id: localId(m), x: c % m.size, y: Math.floor(c / m.size), dir: dirTo[c] as Dir, paid: 0 });
+    c = next[c];
   }
 }
 
 // ---------------------------------------------------------------------------
-// Building
+// Building (real money, 100% refund on removal)
 // ---------------------------------------------------------------------------
 
-export function placeMiner(m: MicroState, x: number, y: number, dir: Dir): boolean {
-  if (!inBounds(m, x, y)) return false;
-  if (!isOre(m, x, y)) return false; // miners ONLY on ore veins
-  if (minerAt(m, x, y) || beltAt(m, x, y) || isWarehouse(m, x, y)) return false;
-  if (m.availableParts < CONFIG.MINER_COST) return false;
-  m.miners.push({ id: nid('miner'), x, y, dir, timer: 0, blocked: false });
-  m.availableParts -= CONFIG.MINER_COST;
-  return true;
+export type MicroBuildResult = 'ok' | 'invalid' | 'money';
+
+export function canPlaceMiner(m: MicroState, x: number, y: number): boolean {
+  return isResource(m, x, y) && !minerAt(m, x, y) && !beltAt(m, x, y);
 }
 
-export function placeBelt(m: MicroState, x: number, y: number, dir: Dir): boolean {
-  if (!inBounds(m, x, y)) return false;
-  if (isWarehouse(m, x, y) || minerAt(m, x, y)) return false;
+export function canPlaceBelt(m: MicroState, x: number, y: number): boolean {
+  return mInBounds(m, x, y) && !isWarehouse(m, x, y) && !minerAt(m, x, y);
+}
+
+export function placeMiner(state: GameState, m: MicroState, x: number, y: number, dir: Dir): MicroBuildResult {
+  if (!canPlaceMiner(m, x, y)) return 'invalid';
+  if (!canAfford(state, COST_MINER)) return 'money';
+  m.miners.push({ id: localId(m), x, y, dir, timer: 0, paid: COST_MINER, blockedDays: 0 });
+  spend(state, COST_MINER, 'construction');
+  return 'ok';
+}
+
+/** Place a belt, or re-orient an existing one for free. */
+export function placeBelt(state: GameState, m: MicroState, x: number, y: number, dir: Dir): MicroBuildResult {
+  if (!canPlaceBelt(m, x, y)) return 'invalid';
   const existing = beltAt(m, x, y);
   if (existing) {
-    existing.dir = dir; // re-orient, no extra cost
-    return true;
+    existing.dir = dir;
+    return 'ok';
   }
-  if (m.availableParts < CONFIG.BELT_COST) return false;
-  m.belts.push({ id: nid('belt'), x, y, dir });
-  m.availableParts -= CONFIG.BELT_COST;
-  return true;
+  if (!canAfford(state, COST_BELT)) return 'money';
+  m.belts.push({ id: localId(m), x, y, dir, paid: COST_BELT });
+  spend(state, COST_BELT, 'construction');
+  return 'ok';
 }
 
-export function eraseAt(m: MicroState, x: number, y: number): boolean {
+export function eraseMicro(state: GameState, m: MicroState, x: number, y: number): boolean {
   const mi = m.miners.findIndex((e) => e.x === x && e.y === y);
   if (mi >= 0) {
+    refund(state, m.miners[mi].paid);
     m.miners.splice(mi, 1);
-    m.availableParts += CONFIG.MINER_COST;
     return true;
   }
   const bi = m.belts.findIndex((e) => e.x === x && e.y === y);
   if (bi >= 0) {
+    refund(state, m.belts[bi].paid);
     m.belts.splice(bi, 1);
-    m.availableParts += CONFIG.BELT_COST;
+    m.items = m.items.filter((it) => it.x !== x || it.y !== y);
     return true;
   }
   return false;
+}
+
+/** Rotate the machine/belt under (x,y) clockwise (R key). */
+export function rotateAt(m: MicroState, x: number, y: number): boolean {
+  const e = minerAt(m, x, y) ?? beltAt(m, x, y);
+  if (!e) return false;
+  e.dir = ((e.dir + 1) % 4) as Dir;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics for the renderer
+// ---------------------------------------------------------------------------
+
+function frontAccepts(m: MicroState, x: number, y: number): boolean {
+  return isWarehouse(m, x, y) || beltAt(m, x, y) !== null;
+}
+
+/** Red "!" — the miner cannot output, or has been held back too long. */
+export function minerAlert(m: MicroState, miner: MicroMiner): boolean {
+  const fx = miner.x + DX[miner.dir];
+  const fy = miner.y + DY[miner.dir];
+  return !frontAccepts(m, fx, fy) || miner.blockedDays >= MINER_BLOCKED_ALERT_DAYS;
+}
+
+/** Dashed marker — the belt's exit leads nowhere (not a belt, not the warehouse). */
+export function beltDeadEnd(m: MicroState, belt: MicroBelt): boolean {
+  return !frontAccepts(m, belt.x + DX[belt.dir], belt.y + DY[belt.dir]);
 }
 
 // ---------------------------------------------------------------------------
 // Simulation step
 // ---------------------------------------------------------------------------
 
-function cellItemCount(m: MicroState, x: number, y: number): number {
-  let n = 0;
-  for (const it of m.items) if (it.cellX === x && it.cellY === y) n++;
-  return n;
-}
-
-/** Can a new item enter cell (x,y)? (belt or warehouse, under capacity) */
-function canAccept(m: MicroState, x: number, y: number): boolean {
-  if (!inBounds(m, x, y)) return false;
-  if (isWarehouse(m, x, y)) return true; // warehouse always accepts
-  if (!beltAt(m, x, y)) return false;
-  return cellItemCount(m, x, y) < CONFIG.MAX_ITEMS_PER_CELL;
-}
-
-/**
- * Advance the micro world by dt. Returns units delivered to the warehouse.
- */
-export function updateMicro(m: MicroState, dt: number): number {
+/** Advance by dt days. Returns units that entered the warehouse. */
+export function stepMicro(m: MicroState, dt: number): number {
   let delivered = 0;
-
-  // 1) Miners produce toward their facing cell.
-  for (const miner of m.miners) {
-    const v = DIRS[miner.dir];
-    const tx = miner.x + v.dx;
-    const ty = miner.y + v.dy;
-    const outputOk = canAccept(m, tx, ty) || cellItemCount(m, tx, ty) < CONFIG.MAX_ITEMS_PER_CELL;
-    miner.blocked = !(inBounds(m, tx, ty) && (beltAt(m, tx, ty) || isWarehouse(m, tx, ty)));
-
-    miner.timer += dt;
-    if (miner.timer >= CONFIG.MINER_INTERVAL) {
-      if (!miner.blocked && outputOk && canAccept(m, tx, ty)) {
-        miner.timer -= CONFIG.MINER_INTERVAL;
-        m.items.push({
-          id: nid('item'),
-          px: tx,
-          py: ty,
-          cellX: tx,
-          cellY: ty,
-        });
-      } else {
-        // Hold timer at max so it fires immediately once unblocked.
-        miner.timer = CONFIG.MINER_INTERVAL;
-      }
-    }
+  const cells = new Map<number, MicroItem[]>();
+  for (const it of m.items) {
+    const k = mIdx(m, it.x, it.y);
+    const arr = cells.get(k);
+    if (arr) arr.push(it);
+    else cells.set(k, [it]);
   }
+  const gone = new Set<MicroItem>();
+  const take = (k: number, it: MicroItem) => {
+    const arr = cells.get(k);
+    if (!arr) return;
+    const i = arr.indexOf(it);
+    if (i >= 0) arr.splice(i, 1);
+  };
+  const minP = (arr: MicroItem[] | undefined) => {
+    let v = Infinity;
+    if (arr) for (const o of arr) v = Math.min(v, o.p);
+    return v;
+  };
 
-  // 2) Move items along belts with backpressure.
-  // Process in an order that lets the frontmost items move first.
-  for (const item of m.items) {
-    const cx = item.cellX;
-    const cy = item.cellY;
-
-    if (isWarehouse(m, cx, cy)) continue; // will be collected below
-
-    const belt = beltAt(m, cx, cy);
-    if (!belt) continue; // orphaned item (belt removed) — idles
-
-    const v = DIRS[belt.dir];
-    const nx = cx + v.dx;
-    const ny = cy + v.dy;
-
-    // target cell center in cell-space
-    const targetPx = nx;
-    const targetPy = ny;
-    const dx = targetPx - item.px;
-    const dy = targetPy - item.py;
-    const dist = Math.hypot(dx, dy);
-    const step = CONFIG.ITEM_SPEED * dt;
-
-    if (dist <= step || dist < 1e-6) {
-      // Reached the boundary into the next cell — may we hand off?
-      if (canAccept(m, nx, ny)) {
-        item.px = targetPx;
-        item.py = targetPy;
-        item.cellX = nx;
-        item.cellY = ny;
-      } else {
-        // Backpressure: clamp to just inside current cell toward the edge.
-        item.px = cx + v.dx * 0.42;
-        item.py = cy + v.dy * 0.42;
-      }
-    } else {
-      // Advance, but don't cross into a full next cell.
-      const willReachEdge = dist - step < 0.5;
-      if (willReachEdge && !canAccept(m, nx, ny)) {
-        item.px = cx + v.dx * 0.42;
-        item.py = cy + v.dy * 0.42;
-      } else {
-        item.px += (dx / dist) * step;
-        item.py += (dy / dist) * step;
-      }
-    }
-  }
-
-  // 3) Collect items that reached the warehouse.
-  const survivors: MicroItem[] = [];
-  for (const item of m.items) {
-    if (isWarehouse(m, item.cellX, item.cellY)) {
-      if (m.storage.count < m.storage.capacity) {
-        m.storage.count += 1;
-        delivered += 1;
-      } else {
-        // Warehouse full: keep the item sitting at the edge (soft overflow).
-        survivors.push(item);
-      }
+  // 1) Items: front-most first so backpressure propagates upstream.
+  const order = [...m.items].sort((a, b) => b.p - a.p);
+  for (const it of order) {
+    const k = mIdx(m, it.x, it.y);
+    const belt = beltAt(m, it.x, it.y);
+    if (!belt) {
+      gone.add(it);
+      take(k, it);
       continue;
     }
-    survivors.push(item);
+    const here = cells.get(k) ?? [];
+    let aheadP = Infinity;
+    for (const o of here) if (o !== it && o.p > it.p) aheadP = Math.min(aheadP, o.p);
+    const target = it.p + BELT_SPEED * dt;
+
+    if (aheadP !== Infinity) {
+      it.p = Math.max(it.p, Math.min(target, aheadP - SPACING));
+      continue;
+    }
+    if (target < 1) {
+      it.p = target;
+      continue;
+    }
+    const fx = it.x + DX[belt.dir];
+    const fy = it.y + DY[belt.dir];
+    if (isWarehouse(m, fx, fy)) {
+      gone.add(it);
+      take(k, it);
+      delivered += 1;
+      continue;
+    }
+    if (beltAt(m, fx, fy)) {
+      const fk = mIdx(m, fx, fy);
+      const there = cells.get(fk) ?? [];
+      if (there.length < BELT_CELL_CAPACITY) {
+        const np = Math.min(target - 1, minP(there) - SPACING);
+        if (np >= 0) {
+          take(k, it);
+          it.x = fx;
+          it.y = fy;
+          it.p = np;
+          there.push(it);
+          cells.set(fk, there);
+          continue;
+        }
+      }
+    }
+    it.p = 1; // wait at the exit edge (backpressure)
   }
-  m.items = survivors;
+  if (gone.size) m.items = m.items.filter((i) => !gone.has(i));
 
-  // 4) Rolling throughput over THROUGHPUT_WINDOW seconds.
-  m.deliveryWindow.push(delivered);
-  const maxSamples = Math.round(CONFIG.THROUGHPUT_WINDOW / dt);
-  while (m.deliveryWindow.length > maxSamples) m.deliveryWindow.shift();
-  const sum = m.deliveryWindow.reduce((a, b) => a + b, 0);
-  const windowSecs = m.deliveryWindow.length * dt;
-  m.throughput = windowSecs > 0 ? sum / windowSecs : 0;
+  // 2) Miners produce into the cell they face.
+  for (const miner of m.miners) {
+    if (miner.timer < 1) miner.timer = Math.min(1, miner.timer + MINER_RATE * dt);
+    if (miner.timer < 1) continue;
+    const fx = miner.x + DX[miner.dir];
+    const fy = miner.y + DY[miner.dir];
+    if (isWarehouse(m, fx, fy)) {
+      miner.timer -= 1;
+      miner.blockedDays = 0;
+      delivered += 1;
+      continue;
+    }
+    if (beltAt(m, fx, fy)) {
+      const fk = mIdx(m, fx, fy);
+      const there = cells.get(fk) ?? [];
+      if (there.length < BELT_CELL_CAPACITY && minP(there) >= SPACING) {
+        const it: MicroItem = { x: fx, y: fy, p: 0 };
+        m.items.push(it);
+        there.push(it);
+        cells.set(fk, there);
+        miner.timer -= 1;
+        miner.blockedDays = 0;
+        continue;
+      }
+    }
+    miner.blockedDays += dt;
+  }
 
+  m.totalDelivered += delivered;
+  m.deliveredToday += delivered;
   return delivered;
 }
 
-export const microKey = keyOf;
+/** Day rollover: 30-day moving average converted to a monthly figure. */
+export function dailyMicro(m: MicroState): void {
+  m.dailyHistory.push(m.deliveredToday);
+  m.deliveredToday = 0;
+  while (m.dailyHistory.length > MICRO_AVG_DAYS) m.dailyHistory.shift();
+  const sum = m.dailyHistory.reduce((a, b) => a + b, 0);
+  m.monthlyRate = m.dailyHistory.length ? (sum / m.dailyHistory.length) * DAYS_PER_MONTH : 0;
+}
